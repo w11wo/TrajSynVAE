@@ -6,7 +6,9 @@ Author: Qizhong Zhang
 Data Preparation
 """
 
+import json
 import os
+
 import pandas as pd
 import numpy as np
 import torch
@@ -393,6 +395,106 @@ class MYDATA(Dataset):
             validid = np.array([]).astype(int) if validprop == 0 else \
                         np.random.choice(np.setdiff1d(remaining, testid), replace=False, size=int(validprop*self.IDX[-1]))
         trainid = np.append(trainid, np.setdiff1d(remaining, np.append(testid, validid)))
+        return trainid, validid, testid
+
+
+class MoveSimData(Dataset):
+    def __init__(self, data_type):
+        super().__init__()
+
+        city = data_type
+        self.path = os.path.join("preprocessed", city)
+
+        self.tim_size = 1440
+        self.infer_maxlast = 1440
+        self.poi_size = 0
+        self.POI = None
+        self.MIN_LEN = 2
+        self.REFORM = {}
+        self.GENDATA = []
+
+        # GPS coordinates: one "lat lon" line per road-segment ID (0-indexed)
+        gps_rows = []
+        with open(os.path.join(self.path, 'gps')) as fh:
+            for line in fh:
+                lat, lon = map(float, line.strip().split())
+                gps_rows.append([lat, lon])
+        self.GPS = np.array(gps_rows)
+        self.loc_size = self.GPS.shape[0]
+
+        # Load all three splits, filtering by minimum length
+        train_raw = self._read_trajs('real.data')
+        test_raw  = self._read_trajs('test.data')
+        val_raw   = self._read_trajs('val.data')
+
+        self._all_trajs: list = []
+
+        for rids in train_raw:
+            if len(rids) >= self.MIN_LEN:
+                self._all_trajs.append(self._make_traj(rids))
+        self._train_end = len(self._all_trajs)
+
+        for rids in test_raw:
+            if len(rids) >= self.MIN_LEN:
+                self._all_trajs.append(self._make_traj(rids))
+        self._test_end = len(self._all_trajs)
+
+        for rids in val_raw:
+            if len(rids) >= self.MIN_LEN:
+                self._all_trajs.append(self._make_traj(rids))
+
+        # Single synthetic user – road-network data has no user concept
+        self.USERLIST = np.array([0])
+        self.usr_size = 1
+
+        # DATA dict expected by location_constraints() and reform()
+        self.DATA = {0: {i: t for i, t in enumerate(self._all_trajs)}}
+        self.IDX = np.array([len(self._all_trajs)])
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _read_trajs(self, filename):
+        trajs = []
+        with open(os.path.join(self.path, filename)) as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    trajs.append(list(map(int, line.split())))
+        return trajs
+
+    def _make_traj(self, rids):
+        n = len(rids)
+        return {
+            # 'tim': absolute position used for positional encoding (step index)
+            # 'sta': sojourn time used for time-prediction (uniform 1 per segment)
+            'loc': np.array(rids, dtype=np.int64),
+            'tim': np.arange(n, dtype=np.float64),
+            'sta': np.ones(n, dtype=np.float64),
+        }
+
+    # ------------------------------------------------------------------
+    # Dataset interface
+    # ------------------------------------------------------------------
+
+    def __len__(self):
+        return len(self._all_trajs)
+
+    def __getitem__(self, index):
+        traj = self._all_trajs[index]
+        output = {k: v.copy() for k, v in traj.items()}
+        output['usr'] = np.zeros(len(traj['loc']), dtype=np.int64)
+        return output
+
+    def split(self, testprop=1.0, validprop=1.0):
+        """Return pre-defined MoveSim train / val / test index arrays."""
+        trainid = np.arange(self._train_end, dtype=int)
+        testid  = np.arange(self._train_end, self._test_end, dtype=int)
+        if validprop > 0:
+            validid = np.arange(self._test_end, len(self._all_trajs), dtype=int)
+        else:
+            validid = np.array([], dtype=int)
         return trainid, validid, testid
 
 
